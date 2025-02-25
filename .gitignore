@@ -1,0 +1,10 @@
+.idea
+AGZ
+AGZ_subset
+AGZ.zip
+__pycache__/
+training/training_logs/*
+training/models/*
+misc/airsim_collected_data
+misc/MH_01_easy
+AGZ.zip
