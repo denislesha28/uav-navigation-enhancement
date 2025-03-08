@@ -16,39 +16,36 @@ from preprocessing.sliding_windows import create_sliding_windows, validate_windo
 from uav_navigation_kf import UAVNavigationKF, quaternion_to_euler
 
 
-
-def resample_ground_truth(ground_truth_df, target_samples=27137):
+def resample_ground_truth_with_direct_mapping(ground_truth_df, target_timestamps):
     """
-    Resample ground truth to exact number of samples using scipy.signal.resample
+    Resample ground truth with direct timestamp mapping to avoid duplication
 
     Args:
         ground_truth_df: Ground truth DataFrame
-        target_samples: Desired number of samples (default matches IMU)
+        target_timestamps: Target timestamps to align to
     """
     from scipy import signal
 
-    # Get original index for time scaling
-    old_index = ground_truth_df.index
+    # Get original timestamps for reference
+    orig_times = ground_truth_df.index
 
-    # Resample each column
+    # Resample each column with signal.resample
     resampled_data = {}
     for col in ground_truth_df.columns:
-        resampled_data[col] = signal.resample(ground_truth_df[col].values, target_samples)
+        resampled_data[col] = signal.resample(ground_truth_df[col].values, len(target_timestamps))
 
-    # Create new index with same time span
-    new_index = pd.timedelta_range(
-        start=old_index[0],
-        end=old_index[-1],
-        periods=target_samples
-    )
-
-    # Create new DataFrame
-    resampled_df = pd.DataFrame(resampled_data, index=new_index)
+    # Create new DataFrame with target timestamps directly
+    resampled_df = pd.DataFrame(resampled_data, index=target_timestamps)
 
     # Print metrics
+    resampled_len = len(resampled_df)
+    unique_samples = resampled_df.drop_duplicates().shape[0]
+
     print(f"\nGround truth resampling metrics:")
     print(f"Original samples: {len(ground_truth_df)}")
     print(f"Resampled samples: {len(resampled_df)}")
+    print(f"Unique samples:   {unique_samples}")
+    print(f"Duplicate ratio:  {(resampled_len - unique_samples) / resampled_len:.2%}")
 
     return resampled_df
 
@@ -108,13 +105,10 @@ def align_sensors_multi_freq(df_dict, target_freq='100ms'):
             df_aligned = staged_gps_downsample(df_trimmed, target_timestamps, 10)
 
         elif sensor_name == "Ground_truth_df":
-            df_aligned = resample_ground_truth(
+            df_aligned = resample_ground_truth_with_direct_mapping(
                 ground_truth_df=df_trimmed,
-                target_samples=len(df_dict['IMU_df'])
+                target_timestamps=target_timestamps
             )
-            # Use linear interpolation and ffill/bfill
-            df_aligned = df_aligned.reindex(target_timestamps).interpolate(method='linear')
-            df_aligned = df_aligned.ffill().bfill()
 
         else:
             #Keep using nearest for other sensors
@@ -379,67 +373,237 @@ def validate_ground_truth(gt_df):
 
 
 def calc_error_state_vector(aligned_data: dict):
+    """
+    Calculate error state vector for each timestep using Kalman filter with robust quaternion handling
+
+    Returns:
+        List of (timestamp, error_state) tuples
+    """
     imu_data = aligned_data['IMU_df']
+    gyro_data = aligned_data['RawGyro_df']
     gps_data = aligned_data['Board_gps_df']
     ground_truth = aligned_data['Ground_truth_df']
-    timestamp = ground_truth.index[0]
-    print(gps_data.head())
+
     # Initialize KF
     kf = UAVNavigationKF(dt=0.1)  # 10Hz sampling rate
 
-    # Initial state from first ground truth entry
-    initial_state = np.array([
-        ground_truth.iloc[0]['Accel_x'],  # px
-        ground_truth.iloc[0]['Accel_y'],  # py
-        ground_truth.iloc[0]['Accel_z'],  # pz
-        ground_truth.iloc[0]['Vel_x'],  # vx
-        ground_truth.iloc[0]['Vel_y'],  # vy
-        ground_truth.iloc[0]['Vel_z'],  # vz
-        # Convert quaternion to euler for roll, pitch, yaw
-        *quaternion_to_euler(ground_truth.iloc[0][['Attitude_w', 'Attitude_x', 'Attitude_y', 'Attitude_z']])
+    # Initialize with safer defaults
+    initial_position = np.zeros(3)
+    initial_velocity = np.zeros(3)
+    initial_attitude = np.zeros(3)
+
+    # Try to get initial state from first ground truth entry
+    try:
+        if not ground_truth.empty and len(ground_truth) > 0:
+            # Position
+            if 'p_RS_R_x' in ground_truth.columns:
+                initial_position = np.array([
+                    ground_truth.iloc[0]['p_RS_R_x'],
+                    ground_truth.iloc[0]['p_RS_R_y'],
+                    ground_truth.iloc[0]['p_RS_R_z']
+                ])
+
+            # Velocity
+            if 'Vel_x' in ground_truth.columns:
+                initial_velocity = np.array([
+                    ground_truth.iloc[0]['Vel_x'],
+                    ground_truth.iloc[0]['Vel_y'],
+                    ground_truth.iloc[0]['Vel_z']
+                ])
+
+            # Attitude - with robust quaternion handling
+            quat_cols = ['Attitude_w', 'Attitude_x', 'Attitude_y', 'Attitude_z']
+            if all(col in ground_truth.columns for col in quat_cols):
+                quat_data = ground_truth.iloc[0][quat_cols]
+                # Check for valid quaternion
+                quat_values = [quat_data['Attitude_w'], quat_data['Attitude_x'],
+                               quat_data['Attitude_y'], quat_data['Attitude_z']]
+
+                if all(np.isfinite(quat_values)) and np.linalg.norm(quat_values) > 1e-10:
+                    initial_attitude = quaternion_to_euler(quat_data)
+    except Exception as e:
+        print(f"Error initializing from ground truth: {e}")
+        print("Using default zero initialization")
+
+    # Combine into initial state vector
+    initial_state = np.concatenate([
+        initial_position,
+        initial_velocity,
+        initial_attitude
     ])
 
+    # Initialize Kalman filter
     kf.initialize(initial_state)
 
+    # Storage for error states and previous values
     error_states = []
+    prev_idx = imu_data.index[0]
+    prev_position = initial_position.copy()
 
-    # For each timestamp in your aligned data:
-    for idx, row in aligned_data["IMU_df"].iterrows():
-        kf.predict()
+    # Counters for diagnostics
+    nan_warning_count = 0
+    processed_count = 0
+    error_count = 0
 
-        # Create measurement vector from GPS data
-        measurement = np.array([
-            # IMU accelerations
-            imu_data.loc[idx]['x'],
-            imu_data.loc[idx]['y'],
-            imu_data.loc[idx]['z'],
+    # Process each timestamp
+    for idx, _ in imu_data.iterrows():
+        try:
+            # Prediction step
+            kf.predict()
 
-            # GPS velocities
-            gps_data.loc[idx]['vel_n_m_s'],
-            gps_data.loc[idx]['vel_e_m_s'],
-            gps_data.loc[idx]['vel_d_m_s']
-        ])
+            # Create measurement vector from IMU and GPS data
+            # Ensure all required data is present
+            if idx not in gyro_data.index or idx not in gps_data.index:
+                continue
 
-        # Update KF with measurement
-        kf.update(measurement)
+            measurement = np.array([
+                # IMU accelerations
+                imu_data.loc[idx]['x'],
+                imu_data.loc[idx]['y'],
+                imu_data.loc[idx]['z'],
 
-        # Get ground truth state for this timestamp
-        true_state = np.array([
-            ground_truth.loc[idx]['Accel_x'],
-            ground_truth.loc[idx]['Accel_y'],
-            ground_truth.loc[idx]['Accel_z'],
-            ground_truth.loc[idx]['Vel_x'],
-            ground_truth.loc[idx]['Vel_y'],
-            ground_truth.loc[idx]['Vel_z'],
-            *quaternion_to_euler(ground_truth.loc[idx][['Attitude_w', 'Attitude_x', 'Attitude_y', 'Attitude_z']])
-        ])
+                # IMU angular velocities
+                gyro_data.loc[idx]['x'],
+                gyro_data.loc[idx]['y'],
+                gyro_data.loc[idx]['z'],
 
-        # Calculate error state using ground truth
-        error_state = kf.calculate_error_state(true_state)
-        error_states.append((idx, error_state))
+                # GPS velocities
+                gps_data.loc[idx]['vel_n_m_s'],
+                gps_data.loc[idx]['vel_e_m_s'],
+                gps_data.loc[idx]['vel_d_m_s']
+            ])
+
+            # Check for NaN values in measurement
+            if np.isnan(measurement).any():
+                if nan_warning_count < 5:
+                    print(f"NaN values in measurement at index {idx}, skipping")
+                    nan_warning_count += 1
+                continue
+
+            # Update KF with measurement
+            kf.update(measurement)
+            processed_count += 1
+
+            # Process ground truth if available
+            if idx in ground_truth.index:
+                # Get true position
+                true_position = np.zeros(3)
+                if 'p_RS_R_x' in ground_truth.columns:
+                    true_position = np.array([
+                        ground_truth.loc[idx]['p_RS_R_x'],
+                        ground_truth.loc[idx]['p_RS_R_y'],
+                        ground_truth.loc[idx]['p_RS_R_z']
+                    ])
+                else:
+                    # If position isn't available, estimate from velocity
+                    if idx > imu_data.index[0]:
+                        dt = (idx - prev_idx).total_seconds()
+                        vel = np.array([
+                            ground_truth.loc[idx]['Vel_x'],
+                            ground_truth.loc[idx]['Vel_y'],
+                            ground_truth.loc[idx]['Vel_z']
+                        ])
+                        true_position = prev_position + vel * dt
+                    else:
+                        true_position = initial_position
+
+                # Get velocity
+                true_velocity = np.array([
+                    ground_truth.loc[idx]['Vel_x'],
+                    ground_truth.loc[idx]['Vel_y'],
+                    ground_truth.loc[idx]['Vel_z']
+                ])
+
+                # Get attitude with validation
+                quat_cols = ['Attitude_w', 'Attitude_x', 'Attitude_y', 'Attitude_z']
+                quat_data = ground_truth.loc[idx][quat_cols]
+
+                # Validate quaternion
+                quat_values = [quat_data['Attitude_w'], quat_data['Attitude_x'],
+                               quat_data['Attitude_y'], quat_data['Attitude_z']]
+
+                if any(np.isnan(quat_values)) or np.linalg.norm(quat_values) < 1e-10:
+                    # Skip error calculation for this frame if quaternion is invalid
+                    continue
+
+                # Convert quaternion to euler angles
+                true_euler = quaternion_to_euler(quat_data)
+
+                # Check for valid euler angles
+                if not np.all(np.isfinite(true_euler)):
+                    continue
+
+                # Assemble true state vector
+                true_state = np.concatenate([
+                    true_position,
+                    true_velocity,
+                    true_euler
+                ])
+
+                # Calculate error state
+                error_state = kf.calculate_error_state(true_state)
+
+                # Validate error state
+                if np.any(np.isnan(error_state)):
+                    error_count += 1
+                    if error_count < 5:
+                        print(f"Warning: NaN values in error state at index {idx}")
+                    continue
+
+                # Add valid error state to result list
+                error_states.append((idx, error_state))
+
+                # Update previous values for next iteration
+                prev_idx = idx
+                prev_position = true_position
+
+        except Exception as e:
+            print(f"Error processing frame at {idx}: {e}")
+            continue
+
+    # Final diagnostics
+    print(f"Processed {processed_count} frames, generated {len(error_states)} valid error states")
+    if error_count > 0:
+        print(f"Encountered {error_count} frames with invalid error states")
 
     return error_states
 
+def validate_error_states(error_states):
+    """
+    Validate error states have reasonable values
+
+    Args:
+        error_states: List of (timestamp, error_state) tuples
+    """
+    if not error_states:
+        print("No error states to validate!")
+        return
+
+    error_array = np.array([e for _, e in error_states])
+
+    # Check for NaN values
+    nan_count = np.isnan(error_array).sum()
+    if nan_count > 0:
+        print(f"WARNING: Found {nan_count} NaN values in error states!")
+
+    # Check for all-zero components (problem indicator)
+    zero_cols = np.where(np.all(error_array == 0, axis=0))[0]
+    if zero_cols.size > 0:
+        component_names = ['φE', 'φN', 'φU', 'δυE', 'δυN', 'δυU',
+                           'δL', 'δλ', 'δh', 'εx', 'εy', 'εz',
+                           '∇x', '∇y', '∇z']
+        print(f"WARNING: These components are all zeros: {[component_names[i] for i in zero_cols]}")
+
+    # Print summary statistics
+    print("\nError State Statistics:")
+    component_names = ['φE', 'φN', 'φU', 'δυE', 'δυN', 'δυU',
+                       'δL', 'δλ', 'δh', 'εx', 'εy', 'εz',
+                       '∇x', '∇y', '∇z']
+
+    for i, name in enumerate(component_names):
+        values = error_array[:, i]
+        print(f"{name}: min={np.min(values):.4f}, max={np.max(values):.4f}, "
+              f"mean={np.mean(values):.4f}, std={np.std(values):.4f}")
 
 def plot_error_states(error_states, timestamps, save_path=None):
     """
@@ -537,8 +701,9 @@ def main():
     print("GPS Timestamps (first 5):", aligned_data['Board_gps_df'].index[:5])  # Also check GPS
 
     error_states = calc_error_state_vector(aligned_data)
+    validate_error_states(error_states)
 
-    plot_error_states(error_states, aligned_data["Ground_truth_df"].index)
+#    plot_error_states(error_states, aligned_data["Ground_truth_df"].index)
 
     # plot_error_states(error_states, aligned_data.idx)
     # ground_truth_interpolated = aligned_data.get("Ground_truth_df")

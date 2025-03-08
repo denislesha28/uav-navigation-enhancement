@@ -7,6 +7,55 @@ import torch
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, explained_variance_score
 
 
+def calculate_spatial_errors(y_true, y_pred):
+    """Calculate 2D and Z-Direction errors as in Chen et al."""
+    # 2D error (position components 6 and 7 - Latitude/Longitude)
+    e_2d = np.sqrt((y_true[:, 6] - y_pred[:, 6]) ** 2 +
+                   (y_true[:, 7] - y_pred[:, 7]) ** 2)
+
+    # Z-Direction error (position component 8 - Height)
+    e_z = np.abs(y_true[:, 8] - y_pred[:, 8])
+
+    metrics = {
+        '2d_error': {
+            'mean': np.mean(e_2d),
+            'variance': np.var(e_2d),
+            'std': np.std(e_2d)
+        },
+        'z_error': {
+            'mean': np.mean(e_z),
+            'variance': np.var(e_z),
+            'std': np.std(e_z)
+        }
+    }
+
+    return metrics
+
+
+def calculate_group_metrics(y_true, y_pred):
+    """Calculate metrics for each logical group in the error state vector"""
+    groups = {
+        'attitude': slice(0, 3),
+        'velocity': slice(3, 6),
+        'position': slice(6, 9),
+        'gyro_bias': slice(9, 12),
+        'accel_bias': slice(12, 15)
+    }
+
+    group_metrics = {}
+    for name, indices in groups.items():
+        group_true = y_true[:, indices]
+        group_pred = y_pred[:, indices]
+
+        group_metrics[name] = {
+            'rmse': np.sqrt(mean_squared_error(group_true, group_pred)),
+            'mae': mean_absolute_error(group_true, group_pred),
+            'r2': r2_score(group_true, group_pred)
+        }
+
+    return group_metrics
+
+
 class PerformanceVisualizer:
     def __init__(self, save_dir=None):
         if save_dir is None:
@@ -163,6 +212,51 @@ class PerformanceVisualizer:
             plt.savefig(self.save_dir / f'timeseries_{group_name}{title_suffix}.png')
             plt.close()
 
+    def plot_group_metrics(self, group_metrics, title_suffix=''):
+        """Plot metrics for each logical group in the error state vector"""
+        plt.figure(figsize=(15, 8))
+
+        metrics_to_plot = ['rmse', 'mae', 'r2']
+        groups = list(group_metrics.keys())
+
+        for i, metric in enumerate(metrics_to_plot):
+            plt.subplot(1, len(metrics_to_plot), i + 1)
+            values = [group_metrics[group][metric] for group in groups]
+
+            plt.bar(groups, values)
+            plt.title(f'{metric.upper()} by Component Group')
+            plt.ylabel(metric.upper())
+            plt.xticks(rotation=45)
+            plt.grid(True, axis='y')
+
+        plt.tight_layout()
+        plt.savefig(self.save_dir / f'group_metrics{title_suffix}.png')
+        plt.close()
+
+    def plot_spatial_errors(self, spatial_metrics, title_suffix=''):
+        """Plot spatial errors as in Chen et al."""
+        plt.figure(figsize=(12, 6))
+
+        # 2D Error
+        plt.subplot(1, 2, 1)
+        values = [spatial_metrics['2d_error']['mean'], spatial_metrics['2d_error']['std']]
+        plt.bar(['Mean', 'Std Dev'], values)
+        plt.title('2D Position Error (Latitude/Longitude)')
+        plt.ylabel('Error (m)')
+        plt.grid(True, axis='y')
+
+        # Z Error
+        plt.subplot(1, 2, 2)
+        values = [spatial_metrics['z_error']['mean'], spatial_metrics['z_error']['std']]
+        plt.bar(['Mean', 'Std Dev'], values)
+        plt.title('Z-Direction Error (Height)')
+        plt.ylabel('Error (m)')
+        plt.grid(True, axis='y')
+
+        plt.tight_layout()
+        plt.savefig(self.save_dir / f'spatial_errors{title_suffix}.png')
+        plt.close()
+
 
 def evaluate_test_set(model, test_loader, device):
     model.eval()
@@ -180,6 +274,7 @@ def evaluate_test_set(model, test_loader, device):
     y_true = np.vstack(all_targets)
     y_pred = np.vstack(all_predictions)
 
+    # Basic metrics
     metrics = {
         'mse': mean_squared_error(y_true, y_pred),
         'rmse': np.sqrt(mean_squared_error(y_true, y_pred)),
@@ -188,6 +283,19 @@ def evaluate_test_set(model, test_loader, device):
         'explained_variance': explained_variance_score(y_true, y_pred)
     }
 
+    # Spatial metrics from Chen et al.
+    spatial_metrics = calculate_spatial_errors(y_true, y_pred)
+    metrics.update({
+        '2d_error_mean': spatial_metrics['2d_error']['mean'],
+        '2d_error_std': spatial_metrics['2d_error']['std'],
+        'z_error_mean': spatial_metrics['z_error']['mean'],
+        'z_error_std': spatial_metrics['z_error']['std']
+    })
+
+    # Group metrics
+    group_metrics = calculate_group_metrics(y_true, y_pred)
+
+    # Component metrics
     components = {
         0: 'Roll (φE)', 1: 'Pitch (φN)', 2: 'Yaw (φU)',
         3: 'East (δυE)', 4: 'North (δυN)', 5: 'Up (δυU)',
@@ -200,9 +308,11 @@ def evaluate_test_set(model, test_loader, device):
         {
             'component': components[i],
             'rmse': np.sqrt(mean_squared_error(y_true[:, i], y_pred[:, i])),
-            'r2': r2_score(y_true[:, i], y_pred[:, i])
+            'r2': r2_score(y_true[:, i], y_pred[:, i]),
+            'mae': mean_absolute_error(y_true[:, i], y_pred[:, i]),
+            'explained_variance': explained_variance_score(y_true[:, i], y_pred[:, i])
         }
         for i in range(y_true.shape[1])
     ]
 
-    return metrics, component_metrics, (y_true, y_pred)
+    return metrics, component_metrics, group_metrics, spatial_metrics, (y_true, y_pred)

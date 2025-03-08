@@ -238,19 +238,37 @@ def train_lstm(X, y, device):
     logger.info(f"Final training loss: {metrics_tracker.history['train_loss'][-1]:.6f}")
 
     logger.info("Evaluating on test set...")
-    test_metrics, component_metrics, (y_true, y_pred) = evaluate_test_set(
+    test_metrics, component_metrics, group_metrics, spatial_metrics, (y_true, y_pred) = evaluate_test_set(
         model, test_loader, device)
 
     logger.info("\nTest Set Metrics:")
     for metric_name, value in test_metrics.items():
         logger.info(f"{metric_name}: {value:.4f}")
 
+    logger.info("\nSpatial Metrics (Chen et al.):")
+    logger.info(f"2D Error - Mean: {spatial_metrics['2d_error']['mean']:.4f}, " 
+                f"Std: {spatial_metrics['2d_error']['std']:.4f}")
+    logger.info(f"Z Error - Mean: {spatial_metrics['z_error']['mean']:.4f}, "
+                f"Std: {spatial_metrics['z_error']['std']:.4f}")
+
     logger.info("\nComponent-wise Metrics:")
     for comp in component_metrics:
-        logger.info(f"Component {comp['component']}: RMSE={comp['rmse']:.4f}, R²={comp['r2']:.4f}")
+        logger.info(f"Component {comp['component']}: "
+                    f"RMSE={comp['rmse']:.4f}, "
+                    f"R²={comp['r2']:.4f}, "
+                    f"MAE={comp['mae']:.4f}")
+
+    logger.info("\nGroup Metrics:")
+    for group_name, metrics in group_metrics.items():
+        logger.info(f"{group_name.capitalize()}: "
+                    f"RMSE={metrics['rmse']:.4f}, "
+                    f"R²={metrics['r2']:.4f}, "
+                    f"MAE={metrics['mae']:.4f}")
 
     visualizer.plot_training_history(metrics_tracker.history, title_suffix='_final')
     visualizer.plot_prediction_analysis(y_true, y_pred, title_suffix='_final')
+    visualizer.plot_group_metrics(group_metrics, title_suffix='_final')
+    visualizer.plot_spatial_errors(spatial_metrics, title_suffix='_final')
 
     return model, metrics_tracker.history, test_metrics
 

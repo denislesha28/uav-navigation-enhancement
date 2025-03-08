@@ -39,45 +39,6 @@ def validate_window_input_data(aligned_data: Dict[str, pd.DataFrame]) -> bool:
 
     return True
 
-
-def create_feature_vector(aligned_data: Dict[str, pd.DataFrame]) -> np.ndarray:
-    """Create feature vector with validation and error handling"""
-    if not validate_window_input_data(aligned_data):
-        raise ValueError("Invalid input data")
-
-    try:
-        # Extract features
-        features = [
-            # IMU Features (3D)
-            aligned_data['IMU_df'][['x', 'y', 'z']].values,
-
-            # Gyro Features (3D)
-            aligned_data['RawGyro_df'][['x', 'y', 'z']].values,
-
-            # GPS Features (3D)
-            aligned_data['Board_gps_df'][['vel_n_m_s', 'vel_e_m_s', 'vel_d_m_s']].values
-        ]
-
-        # Concatenate and validate
-        feature_vector = np.concatenate(features, axis=1)
-
-        # Check for NaN values
-        if np.isnan(feature_vector).any():
-            logging.warning("NaN values found in feature vector")
-            # Handle NaN values using forward fill then backward fill
-            feature_vector = pd.DataFrame(feature_vector).fillna(method='ffill').fillna(method='bfill').values
-
-        # Log feature vector statistics
-        logging.info(f"Feature vector shape: {feature_vector.shape}")
-        logging.info(f"Feature stats - Mean: {np.mean(feature_vector):.4f}, Std: {np.std(feature_vector):.4f}")
-
-        return feature_vector
-
-    except Exception as e:
-        logging.error(f"Error creating feature vector: {str(e)}")
-        raise
-
-
 def analyze_error_states(error_states: List[Tuple], n_samples: int) -> Dict:
     """
     Perform detailed analysis of error states
@@ -224,63 +185,181 @@ def validate_error_states(error_states: List[Tuple], n_samples: int) -> bool:
 
     return True
 
-def create_sliding_windows(aligned_data: Dict[str, pd.DataFrame],
-                           error_states: List[Tuple]) -> Tuple[np.ndarray, np.ndarray]:
-    """Create sliding windows with comprehensive validation and error handling"""
+
+def create_sliding_windows(aligned_data, error_states, window_size=100, stride=10):
+    """
+    Creates sliding windows from aligned sensor data and error states.
+
+    Args:
+        aligned_data: Dictionary containing aligned sensor data
+        error_states: List of (timestamp, error_vector) tuples
+        window_size: Number of samples per window
+        stride: Number of samples to shift window
+
+    Returns:
+        X: Array of shape (n_windows, window_size, n_features)
+        y: Array of shape (n_windows, error_vector_size)
+    """
+    import logging
+    import numpy as np
+    import pandas as pd
+
+    logger = logging.getLogger(__name__)
+
     try:
-        # Create feature vector
+        # Check if we have enough error states
+        if len(error_states) < 1:
+            logger.error(f"Not enough error states: {len(error_states)}")
+            return np.array([]), np.array([])
+
+        # Create feature vector from sensor data
         feature_vector = create_feature_vector(aligned_data)
-        n_samples = len(feature_vector)
 
-        # Validate error states
-        if not validate_error_states(error_states, n_samples):
-            raise ValueError("Invalid error states")
+        # Handle NaN values in feature vector
+        if np.isnan(feature_vector).any():
+            logger.warning("NaN values found in feature vector")
+            # Convert to DataFrame for easier handling
+            feature_vector = pd.DataFrame(feature_vector).ffill().bfill().values
 
-        # Calculate number of windows
-        n_windows = ((n_samples - WINDOW_SIZE) // STRIDE) + 1
-        logging.info(f"Creating {n_windows} windows")
+        logger.info(f"Feature vector shape: {feature_vector.shape}")
+        logger.info(f"Feature stats - Mean: {feature_vector.mean():.4f}, Std: {feature_vector.std():.4f}")
 
-        # Initialize arrays
-        X = np.zeros((n_windows, WINDOW_SIZE, 9))
-        y = np.zeros((n_windows, 15))
+        # Ensure we have enough samples for at least one window
+        if len(feature_vector) < window_size:
+            logger.error(f"Not enough samples for window: {len(feature_vector)} < {window_size}")
+            return np.array([]), np.array([])
 
-        # Create windows
+        # Calculate how many windows we can create
+        samples_needed = window_size + (stride * (len(error_states) - 1))
+        if len(feature_vector) < samples_needed:
+            # Adjust number of windows based on available data
+            n_windows = (len(feature_vector) - window_size) // stride + 1
+            # Further limit based on error states
+            n_windows = min(n_windows, len(error_states))
+        else:
+            n_windows = len(error_states)
+
+        logger.info(f"Creating {n_windows} windows")
+
+        # Create output arrays
+        X = np.zeros((n_windows, window_size, feature_vector.shape[1]))
+        y = np.zeros((n_windows, len(error_states[0][1])))  # Error vector size
+
+        # Match error states to windows
+        error_state_indices = {}
+
+        # Create mapping from timestamps to error state indices
+        for i, (timestamp, _) in enumerate(error_states):
+            error_state_indices[timestamp] = i
+
         valid_windows = 0
+
+        # Fill the arrays
         for i in range(n_windows):
-            start_idx = i * STRIDE
-            end_idx = start_idx + WINDOW_SIZE
+            start_idx = i * stride
+            end_idx = start_idx + window_size
 
-            if end_idx <= n_samples:
-                window_data = feature_vector[start_idx:end_idx]
+            # Check if we have enough data
+            if end_idx > len(feature_vector):
+                logger.warning(f"Window {i} exceeds feature vector length")
+                break
 
-                # Validate window data
-                if not np.isnan(window_data).any():
-                    X[valid_windows] = window_data
+            # Get the corresponding window
+            X[valid_windows] = feature_vector[start_idx:end_idx]
 
-                    # Get corresponding error state
-                    _, error_state = error_states[end_idx - 1]
-                    if not np.isnan(error_state).any():
-                        y[valid_windows] = error_state
-                        valid_windows += 1
-                    else:
-                        logging.warning(f"Invalid error state at index {end_idx - 1}")
+            # Get end timestamp - better to use actual timestamps rather than indices
+            end_timestamp = aligned_data['IMU_df'].index[end_idx - 1]
 
-        # Trim arrays to valid windows
-        X = X[:valid_windows]
-        y = y[:valid_windows]
+            # Find closest error state
+            closest_error_idx = find_closest_error_state(end_timestamp, error_states)
 
-        # Final validation
-        if valid_windows == 0:
-            raise ValueError("No valid windows created")
+            if closest_error_idx is not None:
+                _, error_vector = error_states[closest_error_idx]
+                # Check for invalid error vector
+                if np.any(np.isnan(error_vector)):
+                    logger.warning(f"Invalid error state at window {i}")
+                    continue
 
-        logging.info(f"Successfully created {valid_windows} valid windows")
-        logging.info(f"X shape: {X.shape}, y shape: {y.shape}")
+                y[valid_windows] = error_vector
+                valid_windows += 1
+            else:
+                logger.warning(f"No matching error state for window {i}")
 
-        return X, y
+        # Return only valid windows
+        logger.info(f"Successfully created {valid_windows} valid windows")
+
+        return X[:valid_windows], y[:valid_windows]
 
     except Exception as e:
-        logging.error(f"Error creating sliding windows: {str(e)}")
-        raise
+        logger.error(f"Error creating sliding windows: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return np.array([]), np.array([])
+
+
+def find_closest_error_state(timestamp, error_states):
+    """
+    Find index of error state closest to given timestamp
+
+    Args:
+        timestamp: Target timestamp
+        error_states: List of (timestamp, error_vector) tuples
+
+    Returns:
+        int: Index of closest error state or None if not found
+    """
+    if not error_states:
+        return None
+
+    # Convert timestamps to numeric values for comparison
+    if hasattr(timestamp, 'total_seconds'):
+        # Convert to seconds
+        target_time = timestamp.total_seconds()
+    else:
+        # Use as is
+        target_time = timestamp
+
+    # Find closest timestamp
+    min_diff = float('inf')
+    closest_idx = None
+
+    for i, (ts, _) in enumerate(error_states):
+        if hasattr(ts, 'total_seconds'):
+            ts_time = ts.total_seconds()
+        else:
+            ts_time = ts
+
+        diff = abs(ts_time - target_time)
+        if diff < min_diff:
+            min_diff = diff
+            closest_idx = i
+
+    return closest_idx
+
+
+def create_feature_vector(aligned_data):
+    """
+    Create feature vector from aligned sensor data
+
+    Args:
+        aligned_data: Dictionary containing aligned sensor data
+
+    Returns:
+        numpy.ndarray: Feature vector of shape (n_samples, n_features)
+    """
+    # IMU accelerations
+    imu_data = aligned_data['IMU_df'][['x', 'y', 'z']].values
+
+    # IMU angular velocities (gyro)
+    gyro_data = aligned_data['RawGyro_df'][['x', 'y', 'z']].values
+
+    # GPS velocities
+    gps_data = aligned_data['Board_gps_df'][['vel_n_m_s', 'vel_e_m_s', 'vel_d_m_s']].values
+
+    # Combine all features
+    feature_vector = np.hstack([imu_data, gyro_data, gps_data])
+
+    return feature_vector
 
 
 def validate_windows(X: np.ndarray, y: np.ndarray) -> Tuple[bool, Dict]:
