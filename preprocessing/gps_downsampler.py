@@ -1,6 +1,41 @@
 import numpy as np
 import pandas as pd
+from matplotlib import pyplot as plt
 from scipy import interpolate
+
+def resample_ground_truth_with_direct_mapping(ground_truth_df, target_timestamps):
+    """
+    Resample ground truth with direct timestamp mapping to avoid duplication
+
+    Args:
+        ground_truth_df: Ground truth DataFrame
+        target_timestamps: Target timestamps to align to
+    """
+    from scipy import signal
+
+    # Get original timestamps for reference
+    orig_times = ground_truth_df.index
+
+    # Resample each column with signal.resample
+    resampled_data = {}
+    for col in ground_truth_df.columns:
+        resampled_data[col] = signal.resample(ground_truth_df[col].values, len(target_timestamps))
+
+    # Create new DataFrame with target timestamps directly
+    resampled_df = pd.DataFrame(resampled_data, index=target_timestamps)
+
+    # Print metrics
+    resampled_len = len(resampled_df)
+    unique_samples = resampled_df.drop_duplicates().shape[0]
+
+    print(f"\nGround truth resampling metrics:")
+    print(f"Original samples: {len(ground_truth_df)}")
+    print(f"Resampled samples: {len(resampled_df)}")
+    print(f"Unique samples:   {unique_samples}")
+    print(f"Duplicate ratio:  {(resampled_len - unique_samples) / resampled_len:.2%}")
+
+    return resampled_df
+
 
 def regularize_gps_sampling(gps_df, target_freq_hz=30):
     """
@@ -121,3 +156,30 @@ def staged_gps_downsample(gps_df, target_timestamps, target_freq_hz=10):
     aligned_gps = aligned_gps.ffill().bfill()
 
     return aligned_gps
+
+
+def validate_ground_truth(gt_df):
+    fig, axes = plt.subplots(3, 1, figsize=(15, 12))
+
+    # 1. Quaternion magnitude (should be ~1)
+    quat_mag = np.sqrt(gt_df['Attitude_w'] ** 2 + gt_df['Attitude_x'] ** 2 +
+                       gt_df['Attitude_y'] ** 2 + gt_df['Attitude_z'] ** 2)
+    axes[0].plot(quat_mag)
+    axes[0].set_title('Quaternion Magnitude (Should be ~1)')
+    axes[0].axhline(y=1, color='r', linestyle='--')
+
+    # 2. Angular rates vs accelerations
+    axes[1].plot(gt_df['Omega_x'], label='ωx')
+    axes[1].plot(gt_df['Accel_x'], label='ax')
+    axes[1].set_title('Angular Rate vs Acceleration (X-axis)')
+    axes[1].legend()
+
+    # 3. Velocity continuity
+    axes[2].plot(gt_df['Vel_x'], label='Vx')
+    axes[2].plot(gt_df['Vel_y'], label='Vy')
+    axes[2].plot(gt_df['Vel_z'], label='Vz')
+    axes[2].set_title('Velocity Components')
+    axes[2].legend()
+
+    plt.tight_layout()
+    plt.show()
