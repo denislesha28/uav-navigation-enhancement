@@ -31,9 +31,10 @@ def prepare_df(df, max_time_us=2.10e8):
 
 def load_data():
     """
-    Loads sensor data with FilterPy's ImuKalman filter to address lag issues.
+    Loads sensor data with comprehensive error compensation based on
+    Zurich Urban MAV dataset sensor characteristics.
     """
-    # Load IMU data directly - no extra processing
+    # Load raw data
     imu_df = pd.read_csv(
         'AGZ/log_files/RawAccel.csv',
         index_col="Timpstemp",
@@ -42,26 +43,23 @@ def load_data():
     imu_df = prepare_df(imu_df)
     imu_df = imu_df[~imu_df.index.duplicated(keep='first')]
 
-    # Load gyro data
-    raw_gyro_df = pd.read_csv(
+    gyro_df = pd.read_csv(
         'AGZ/log_files/RawGyro.csv',
         index_col="Timpstemp",
         usecols=['Timpstemp', ' x', ' y', ' z', ' temperature']
     )
-    raw_gyro_df = prepare_df(raw_gyro_df)
-    raw_gyro_df = raw_gyro_df[~raw_gyro_df.index.duplicated(keep='first')]
+    gyro_df = prepare_df(gyro_df)
+    gyro_df = gyro_df[~gyro_df.index.duplicated(keep='first')]
 
-    # Load GPS data
-    board_gps_df = pd.read_csv(
+    gps_df = pd.read_csv(
         'AGZ/log_files/OnboardGPS.csv',
         index_col="Timpstemp",
         usecols=['Timpstemp', ' vel_n_m_s', ' vel_e_m_s', ' vel_d_m_s']
     )
-    board_gps_df = prepare_df(board_gps_df)
-    board_gps_df = board_gps_df.groupby(level=0).mean()  # Average duplicates
+    gps_df = prepare_df(gps_df)
+    gps_df = gps_df.groupby(level=0).mean()  # Average duplicates
 
-    # Load ground truth
-    ground_truth_df = pd.read_csv(
+    gt_df = pd.read_csv(
         'AGZ/log_files/OnboardPose.csv',
         index_col="Timpstemp",
         usecols=[
@@ -74,7 +72,137 @@ def load_data():
             ' Height'
         ]
     )
-    ground_truth_df = prepare_df(ground_truth_df)
+    gt_df = prepare_df(gt_df)
+
+    # -------------------- SENSOR ERROR COMPENSATION --------------------
+
+    # Define correction parameters
+    gravity = 9.81
+    scale_factor_correction = 0.003  # 0.3% (middle of range)
+    cross_axis_correction = 0.01  # 1% (middle of range)
+    acc_bias = 0.00275 * 9.80665  # 2.75 mg (middle of range)
+    gyro_bias = 2.5e-5  # Middle of the range (0.5-10 deg/hour)
+    temp_reference = 20.0  # Reference temperature (°C)
+    temp_coefficient = 0.0005  # 0.05% per degree C
+
+    # 1. IMU ERROR COMPENSATION
+
+    # 1.1 Gravity compensation for IMU z-axis
+    imu_df['z'] = imu_df['z'] + gravity
+
+    # 1.2 Scale factor errors (0.1-0.5% based on dataset documentation)
+    imu_df['x'] = imu_df['x'] * (1 + scale_factor_correction)
+    imu_df['y'] = imu_df['y'] * (1 + scale_factor_correction)
+    imu_df['z'] = imu_df['z'] * (1 + scale_factor_correction)
+
+    # 1.3 Cross-axis sensitivity (0.5-2% based on dataset documentation)
+    x_orig, y_orig, z_orig = imu_df['x'].copy(), imu_df['y'].copy(), imu_df['z'].copy()
+    imu_df['x'] = x_orig + cross_axis_correction * (y_orig + z_orig)
+    imu_df['y'] = y_orig + cross_axis_correction * (x_orig + z_orig)
+    imu_df['z'] = z_orig + cross_axis_correction * (x_orig + y_orig)
+
+    # 1.4 Accelerometer bias (0.5-5 mg where g = 9.80665 m/s²)
+    imu_df['x'] = imu_df['x'] - acc_bias
+    imu_df['y'] = imu_df['y'] - acc_bias
+    imu_df['z'] = imu_df['z'] - acc_bias
+
+    # 1.5 Temperature-dependent variations
+    if 'temperature' in imu_df.columns:
+        temp_compensation = (imu_df['temperature'] - temp_reference) * temp_coefficient
+        imu_df['x'] = imu_df['x'] * (1 + temp_compensation)
+        imu_df['y'] = imu_df['y'] * (1 + temp_compensation)
+        imu_df['z'] = imu_df['z'] * (1 + temp_compensation)
+
+    # 2. GYROSCOPE ERROR COMPENSATION
+
+    # 2.1 Gyroscope bias (0.5-10 deg/hour converts to ~2.4e-6 to 4.8e-5 rad/s)
+    gyro_df['x'] -= gyro_bias
+    gyro_df['y'] -= gyro_bias
+    gyro_df['z'] -= gyro_bias
+
+    # 2.2 Scale factor errors (similar to IMU)
+    gyro_df['x'] = gyro_df['x'] * (1 + scale_factor_correction)
+    gyro_df['y'] = gyro_df['y'] * (1 + scale_factor_correction)
+    gyro_df['z'] = gyro_df['z'] * (1 + scale_factor_correction)
+
+    # 2.3 Cross-axis sensitivity
+    x_orig, y_orig, z_orig = gyro_df['x'].copy(), gyro_df['y'].copy(), gyro_df['z'].copy()
+    gyro_df['x'] = x_orig + cross_axis_correction * (y_orig + z_orig)
+    gyro_df['y'] = y_orig + cross_axis_correction * (x_orig + z_orig)
+    gyro_df['z'] = z_orig + cross_axis_correction * (x_orig + y_orig)
+
+    # 2.4 Temperature compensation
+    if 'temperature' in gyro_df.columns:
+        temp_compensation = (gyro_df['temperature'] - temp_reference) * temp_coefficient
+        gyro_df['x'] = gyro_df['x'] * (1 + temp_compensation)
+        gyro_df['y'] = gyro_df['y'] * (1 + temp_compensation)
+        gyro_df['z'] = gyro_df['z'] * (1 + temp_compensation)
+
+    # 3. GPS ERROR COMPENSATION
+
+    # 3.1 Apply GPS error model based on documented RMS errors
+    # Root-mean-square geo-location errors (meters):
+    # x-axis: 2.22 m
+    # y-axis: 3.76 m
+    # z-axis: 5.46 m
+
+    # For velocity data, we need to translate position errors to velocity errors
+    # Assuming 10Hz sampling rate (0.1s between samples)
+    sampling_period = 0.1  # seconds
+
+    # Convert position errors to velocity errors (error/time)
+    # But scale by a factor to avoid overcorrection (using 0.2 as scaling factor)
+    correction_factor = 0.2
+    vel_e_error = 2.22 / sampling_period * correction_factor  # East velocity error
+    vel_n_error = 3.76 / sampling_period * correction_factor  # North velocity error
+    vel_d_error = 5.46 / sampling_period * correction_factor  # Down/Up velocity error
+
+    print(f"Applying GPS velocity corrections: E:{vel_e_error:.4f}, N:{vel_n_error:.4f}, D:{vel_d_error:.4f} m/s")
+
+    # Create error models as distributions around the mean with the RMS errors as std dev
+    # We'll use these to create bias corrections for the GPS velocity data
+    import numpy as np
+
+    if len(gps_df) > 0:
+        # Generate correction arrays based on RMS errors (zero-mean with appropriate std dev)
+        # Using a sine wave modulation to simulate the kind of bias drift seen in real GPS
+        t = np.linspace(0, 2 * np.pi, len(gps_df))
+
+        # East velocity correction
+        if 'vel_e_m_s' in gps_df.columns:
+            bias_drift_e = vel_e_error * 0.5 * np.sin(t / 4)  # Slower drift
+            gps_df['vel_e_m_s'] = gps_df['vel_e_m_s'] - bias_drift_e
+
+        # North velocity correction
+        if 'vel_n_m_s' in gps_df.columns:
+            bias_drift_n = vel_n_error * 0.5 * np.sin(t / 3)  # Medium drift
+            gps_df['vel_n_m_s'] = gps_df['vel_n_m_s'] - bias_drift_n
+
+        # Down velocity correction (largest error)
+        if 'vel_d_m_s' in gps_df.columns:
+            bias_drift_d = vel_d_error * 0.5 * np.sin(t / 2)  # Faster drift
+            gps_df['vel_d_m_s'] = gps_df['vel_d_m_s'] - bias_drift_d
+
+    # 3.2 Apply low-pass filter to further reduce noise
+    from scipy import signal
+
+    # Low-pass filter to remove high-frequency noise (which is more prominent in GPS)
+    b, a = signal.butter(3, 0.2)  # 3rd order Butterworth filter with 0.2 normalized cutoff
+
+    if len(gps_df) > 0:
+        if 'vel_n_m_s' in gps_df.columns and not gps_df['vel_n_m_s'].isna().all():
+            gps_df['vel_n_m_s'] = signal.filtfilt(b, a, gps_df['vel_n_m_s'])
+
+        if 'vel_e_m_s' in gps_df.columns and not gps_df['vel_e_m_s'].isna().all():
+            gps_df['vel_e_m_s'] = signal.filtfilt(b, a, gps_df['vel_e_m_s'])
+
+        if 'vel_d_m_s' in gps_df.columns and not gps_df['vel_d_m_s'].isna().all():
+            gps_df['vel_d_m_s'] = signal.filtfilt(b, a, gps_df['vel_d_m_s'])
+
+    # 3.3 Fill any remaining NaN values with interpolation
+    gps_df = gps_df.interpolate(method='linear', limit_direction='both')
+
+    # -------------------- PROCEED WITH YOUR EXISTING ALIGNMENT LOGIC --------------------
 
     try:
         # First find cross-correlation lag to get initial alignment
@@ -83,7 +211,7 @@ def load_data():
 
         # Extract x-axis data for alignment
         imu_x = imu_df['x'].values
-        gyro_x = raw_gyro_df['x'].values
+        gyro_x = gyro_df['x'].values
 
         # Estimate lag using cross-correlation
         corr = signal.correlate(imu_x, gyro_x, mode='full')
@@ -97,7 +225,7 @@ def load_data():
         print(f"Best shift = {shift_microseconds} us, lag in samples = {best_lag}")
 
         # Apply the lag to create initially aligned gyro data
-        aligned_gyro_df = raw_gyro_df.copy()
+        aligned_gyro_df = gyro_df.copy()
         aligned_gyro_df.index = aligned_gyro_df.index - pd.Timedelta(microseconds=shift_microseconds)
 
         # Now use FilterPy to further refine the alignment
@@ -136,11 +264,11 @@ def load_data():
             gyro_temp = aligned_gyro_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
 
             # Run Kalman filter separately for each axis to smooth and align
-            imu_filtered = pd.DataFrame(index=target_idx, columns=[' x', ' y', ' z'])
-            gyro_filtered = pd.DataFrame(index=target_idx, columns=[' x', ' y', ' z'])
+            imu_filtered = pd.DataFrame(index=target_idx, columns=['x', 'y', 'z'])
+            gyro_filtered = pd.DataFrame(index=target_idx, columns=['x', 'y', 'z'])
 
             # Process each axis
-            for axis in [' x', ' y', ' z']:
+            for axis in ['x', 'y', 'z']:
                 # Get measurements
                 imu_meas = imu_temp[axis].values
                 gyro_meas = gyro_temp[axis].values
@@ -166,8 +294,10 @@ def load_data():
                 gyro_filtered[axis] = gyro_smoothed
 
             # Add temperature column back
-            imu_filtered[' temperature'] = imu_temp[' temperature'].values
-            gyro_filtered[' temperature'] = gyro_temp[' temperature'].values
+            if 'temperature' in imu_temp.columns:
+                imu_filtered['temperature'] = imu_temp['temperature'].values
+            if 'temperature' in gyro_temp.columns:
+                gyro_filtered['temperature'] = gyro_temp['temperature'].values
 
             # Use the filtered data for final alignment
             imu_aligned = imu_filtered
@@ -175,6 +305,13 @@ def load_data():
 
         except ImportError:
             print("FilterPy not installed. Using basic alignment with lag correction.")
+            # Find common time window
+            common_start = max(imu_df.index.min(), aligned_gyro_df.index.min())
+            common_end = min(imu_df.index.max(), aligned_gyro_df.index.max())
+
+            # Create target index
+            target_idx = pd.timedelta_range(start=common_start, end=common_end, freq='100ms')
+
             # Use the initially aligned data
             imu_aligned = imu_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
             gyro_aligned = aligned_gyro_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
@@ -183,23 +320,23 @@ def load_data():
         print(f"Error in alignment: {e}")
         print("Using default alignment without lag correction.")
         # Find common time window for all dataframes
-        common_start = max(imu_df.index.min(), raw_gyro_df.index.min(),
-                           board_gps_df.index.min(), ground_truth_df.index.min())
-        common_end = min(imu_df.index.max(), raw_gyro_df.index.max(),
-                         board_gps_df.index.max(), ground_truth_df.index.max())
+        common_start = max(imu_df.index.min(), gyro_df.index.min(),
+                           gps_df.index.min(), gt_df.index.min())
+        common_end = min(imu_df.index.max(), gyro_df.index.max(),
+                         gps_df.index.max(), gt_df.index.max())
 
         # Create regular timestamp grid
         target_idx = pd.timedelta_range(start=common_start, end=common_end, freq='100ms')
 
         # Use basic nearest-point interpolation
         imu_aligned = imu_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
-        gyro_aligned = raw_gyro_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
+        gyro_aligned = gyro_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
 
     # Align GPS and ground truth data with the same target timestamps
     common_start = max(imu_aligned.index.min(), gyro_aligned.index.min(),
-                       board_gps_df.index.min(), ground_truth_df.index.min())
+                       gps_df.index.min(), gt_df.index.min())
     common_end = min(imu_aligned.index.max(), gyro_aligned.index.max(),
-                     board_gps_df.index.max(), ground_truth_df.index.max())
+                     gps_df.index.max(), gt_df.index.max())
 
     # Create final target timestamps
     target_idx = pd.timedelta_range(start=common_start, end=common_end, freq='100ms')
@@ -207,8 +344,8 @@ def load_data():
     # Align all data to the final target timestamps
     imu_aligned = imu_aligned.reindex(target_idx, method='nearest')
     gyro_aligned = gyro_aligned.reindex(target_idx, method='nearest')
-    gps_aligned = board_gps_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
-    gt_aligned = ground_truth_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
+    gps_aligned = gps_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
+    gt_aligned = gt_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
 
     # Report alignment metrics
     print("\nIMU_df alignment metrics:")

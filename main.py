@@ -1,7 +1,5 @@
 import numpy as np
 import torch
-from matplotlib import pyplot as plt
-from matplotlib.gridspec import GridSpec
 
 from data_loader import load_data
 from kalman_filtering.kf_vector_calc import calc_error_state_vector, validate_error_states
@@ -11,7 +9,7 @@ from preprocessing.sensor_alignment import validate_alignment, align_sensors_mul
 from preprocessing.sliding_windows import create_sliding_windows, validate_windows
 from training.cnn_feature_extraction import CNNFeatureExtractor, validate_cnn_features, visualize_feature_maps
 from training.lstm.bi_lstm_training import train_lstm
-from kalman_filtering.uav_navigation_kf import UAVNavigationKF, quaternion_to_euler
+from training.ltc.ltc_training import train_ltc
 
 
 def main():
@@ -70,7 +68,7 @@ def main():
     visualize_feature_maps(X_spatial)
     # train_ltc(X_spatial[0], y, device)
     train_lstm(X_spatial[0], y, device)
-
+    # train_ltc(X_spatial[0], y, device)
     # training_params = {
     #     'epochs': 200,
     #     'batch_size': 32,

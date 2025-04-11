@@ -1,5 +1,4 @@
 import os
-
 import torch
 import torch.nn as nn
 from torch import optim
@@ -9,59 +8,55 @@ import logging
 import numpy as np
 from collections import defaultdict
 from sklearn.metrics import r2_score, explained_variance_score
-
 from training.lstm.lstm_eval import PerformanceVisualizer, evaluate_test_set, compare_position_errors, \
     compare_orientation_errors, compare_velocity_errors
+
+# Import LTC components from ncps
+from ncps.torch import LTC
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-class EnhancedNavigationLSTM(nn.Module):
+class EnhancedNavigationLTC(nn.Module):
     def __init__(self,
                  input_size=128,
                  hidden_size=64,
-                 num_layers=2,
                  output_size=15,
                  dropout=0.1):
         super().__init__()
-
         self.input_size = input_size
         self.hidden_size = hidden_size
 
-        self.lstm = nn.LSTM(
+        # LTC layer for continuous-time dynamics
+        self.ltc = LTC(
             input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
+            units=hidden_size,
+            return_sequences=True,
             batch_first=True,
-            dropout=dropout,
-            bidirectional=True
+            mixed_memory=True,
+            ode_unfolds=6
         )
 
-        self.attention = nn.MultiheadAttention(
-            embed_dim=hidden_size * 2,
-            num_heads=4,
-            dropout=dropout,
-            batch_first=True
-        )
-
-        self.layer_norm1 = nn.LayerNorm(hidden_size * 2)
-        self.layer_norm2 = nn.LayerNorm(hidden_size * 2)
-
+        # No attention mechanism - LTCs model temporal dynamics differently
+        self.layer_norm = nn.LayerNorm(hidden_size)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size * 2, output_size)
+
+        # Output projection
+        self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
-        lstm_out, _ = self.lstm(x)
+        # Process with LTC - unpack the tuple
+        ltc_out, _ = self.ltc(x)
 
-        attention_out, _ = self.attention(lstm_out, lstm_out, lstm_out)
+        # Now you can index ltc_out as a tensor
+        last_hidden = ltc_out[:, -1, :]
 
-        attended = self.layer_norm1(lstm_out + attention_out)
-
-        last_hidden = attended[:, -1, :]
-
-        out = self.layer_norm2(last_hidden)
+        # Apply normalization and dropout
+        out = self.layer_norm(last_hidden)
         out = self.dropout(out)
+
+        # Final prediction
         predictions = self.fc(out)
 
         return predictions
@@ -110,7 +105,7 @@ class MetricsTracker:
         }
 
 
-def train_lstm(X, y, device):
+def train_ltc(X, y, device):
     logger.info(f"Input shape: {X.shape}, Output shape: {y.shape}")
     logger.info(f"Input dtype: {X.dtype}, Output dtype: {y.dtype}")
 
@@ -123,18 +118,14 @@ def train_lstm(X, y, device):
         'early_stopping_patience': 20
     }
 
-    model = EnhancedNavigationLSTM(
+    model = EnhancedNavigationLTC(
         input_size=X.shape[-1],
         hidden_size=params['hidden_size'],
-        num_layers=params['num_layers'],
         output_size=y.shape[-1]
     ).to(device)
 
+    # 2. Adjust optimizer parameters if needed
     optimizer = optim.Adam(model.parameters(), lr=params['learning_rate'])
-    criterion = nn.MSELoss()
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6
-    )
 
     train_size = int(0.7 * len(X))
     val_size = int(0.15 * len(X))
@@ -152,8 +143,10 @@ def train_lstm(X, y, device):
 
     metrics_tracker = MetricsTracker()
     visualizer = PerformanceVisualizer()
+
     best_val_loss = float('inf')
     early_stopping_counter = 0
+
     logger.info("Starting training loop...")
     for epoch in range(params['epochs']):
         model.train()
@@ -166,6 +159,10 @@ def train_lstm(X, y, device):
 
             try:
                 output = model(data)
+                criterion = nn.MSELoss()
+                scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                    optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-6
+                )
                 loss = criterion(output, target)
 
                 batch_metrics = metrics_tracker.update(output, target)
@@ -196,6 +193,7 @@ def train_lstm(X, y, device):
             for data, target in val_loader:
                 output = model(data)
                 loss = criterion(output, target)
+
                 batch_metrics = metrics_tracker.update(output, target)
                 for k, v in batch_metrics.items():
                     val_metrics[k] += v
@@ -229,10 +227,9 @@ def train_lstm(X, y, device):
             logger.info(f"New best model saved with validation loss: {avg_val_loss:.6f}")
         else:
             early_stopping_counter += 1
-
-        if early_stopping_counter >= params['early_stopping_patience']:
-            logger.info(f"Early stopping triggered at epoch {epoch}")
-            break
+            if early_stopping_counter >= params['early_stopping_patience']:
+                logger.info(f"Early stopping triggered at epoch {epoch}")
+                break
 
     logger.info("Training completed!")
     logger.info(f"Best validation loss: {best_val_loss:.6f}")
@@ -247,7 +244,7 @@ def train_lstm(X, y, device):
         logger.info(f"{metric_name}: {value:.4f}")
 
     logger.info("\nSpatial Metrics (Chen et al.):")
-    logger.info(f"2D Error - Mean: {spatial_metrics['2d_error']['mean']:.4f}, " 
+    logger.info(f"2D Error - Mean: {spatial_metrics['2d_error']['mean']:.4f}, "
                 f"Std: {spatial_metrics['2d_error']['std']:.4f}")
     logger.info(f"Z Error - Mean: {spatial_metrics['z_error']['mean']:.4f}, "
                 f"Std: {spatial_metrics['z_error']['std']:.4f}")
@@ -273,7 +270,15 @@ def train_lstm(X, y, device):
 
     logger.info("Running unit-based model comparison...")
     run_model_comparison(model, test_loader, device)
+
     return model, metrics_tracker.history, test_metrics
+
+
+def __save_model(model):
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    save_dir = os.path.join(current_dir, "..", "models")
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(model.state_dict(), os.path.join(save_dir, 'best_ltc_model.pth'))
 
 
 def run_model_comparison(enhanced_model, test_loader, device):
@@ -391,8 +396,3 @@ def run_model_comparison(enhanced_model, test_loader, device):
         "velocity": velocity_metrics
     }
 
-def __save_model(model):
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    save_dir = os.path.join(current_dir, "..", "models")
-    os.makedirs(save_dir, exist_ok=True)
-    torch.save(model.state_dict(), os.path.join(save_dir, 'best_lstm_model.pth'))

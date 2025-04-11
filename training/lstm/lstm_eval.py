@@ -7,6 +7,107 @@ import torch
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, explained_variance_score
 
 
+def compare_position_errors(baseline_predictions, enhanced_predictions, ground_truth):
+    """Compare position errors between baseline and enhanced filters in meters."""
+    # 2D Error (Latitude/Longitude components)
+    baseline_2d_error = np.sqrt(
+        (ground_truth[:, 6] - baseline_predictions[:, 6]) ** 2 +
+        (ground_truth[:, 7] - baseline_predictions[:, 7]) ** 2
+    )
+
+    enhanced_2d_error = np.sqrt(
+        (ground_truth[:, 6] - enhanced_predictions[:, 6]) ** 2 +
+        (ground_truth[:, 7] - enhanced_predictions[:, 7]) ** 2
+    )
+
+    # Height Error
+    baseline_height_error = np.abs(ground_truth[:, 8] - baseline_predictions[:, 8])
+    enhanced_height_error = np.abs(ground_truth[:, 8] - enhanced_predictions[:, 8])
+
+    # Calculate improvement percentages
+    pos_2d_improvement = ((baseline_2d_error.mean() - enhanced_2d_error.mean()) /
+                          baseline_2d_error.mean() * 100)
+
+    height_improvement = ((baseline_height_error.mean() - enhanced_height_error.mean()) /
+                          baseline_height_error.mean() * 100)
+
+    return {
+        "baseline_2d_error_m": baseline_2d_error.mean(),
+        "enhanced_2d_error_m": enhanced_2d_error.mean(),
+        "baseline_height_error_m": baseline_height_error.mean(),
+        "enhanced_height_error_m": enhanced_height_error.mean(),
+        "2d_improvement_percent": pos_2d_improvement,
+        "height_improvement_percent": height_improvement
+    }
+
+
+def compare_orientation_errors(baseline_predictions, enhanced_predictions, ground_truth):
+    """Compare orientation errors in degrees."""
+    rad_to_deg = 180.0 / np.pi
+
+    baseline_roll_error = np.abs(ground_truth[:, 0] - baseline_predictions[:, 0]) * rad_to_deg
+    enhanced_roll_error = np.abs(ground_truth[:, 0] - enhanced_predictions[:, 0]) * rad_to_deg
+
+    baseline_pitch_error = np.abs(ground_truth[:, 1] - baseline_predictions[:, 1]) * rad_to_deg
+    enhanced_pitch_error = np.abs(ground_truth[:, 1] - enhanced_predictions[:, 1]) * rad_to_deg
+
+    baseline_yaw_error = np.abs(ground_truth[:, 2] - baseline_predictions[:, 2]) * rad_to_deg
+    enhanced_yaw_error = np.abs(ground_truth[:, 2] - enhanced_predictions[:, 2]) * rad_to_deg
+
+    roll_improvement = ((baseline_roll_error.mean() - enhanced_roll_error.mean()) /
+                        baseline_roll_error.mean() * 100)
+
+    pitch_improvement = ((baseline_pitch_error.mean() - enhanced_pitch_error.mean()) /
+                         baseline_pitch_error.mean() * 100)
+
+    yaw_improvement = ((baseline_yaw_error.mean() - enhanced_yaw_error.mean()) /
+                       baseline_yaw_error.mean() * 100)
+
+    return {
+        "baseline_roll_error_deg": baseline_roll_error.mean(),
+        "enhanced_roll_error_deg": enhanced_roll_error.mean(),
+        "baseline_pitch_error_deg": baseline_pitch_error.mean(),
+        "enhanced_pitch_error_deg": enhanced_pitch_error.mean(),
+        "baseline_yaw_error_deg": baseline_yaw_error.mean(),
+        "enhanced_yaw_error_deg": enhanced_yaw_error.mean(),
+        "roll_improvement_percent": roll_improvement,
+        "pitch_improvement_percent": pitch_improvement,
+        "yaw_improvement_percent": yaw_improvement
+    }
+
+
+def compare_velocity_errors(baseline_predictions, enhanced_predictions, ground_truth):
+    """Compare velocity errors in m/s."""
+    baseline_east_vel_error = np.abs(ground_truth[:, 3] - baseline_predictions[:, 3])
+    enhanced_east_vel_error = np.abs(ground_truth[:, 3] - enhanced_predictions[:, 3])
+
+    baseline_north_vel_error = np.abs(ground_truth[:, 4] - baseline_predictions[:, 4])
+    enhanced_north_vel_error = np.abs(ground_truth[:, 4] - enhanced_predictions[:, 4])
+
+    baseline_up_vel_error = np.abs(ground_truth[:, 5] - baseline_predictions[:, 5])
+    enhanced_up_vel_error = np.abs(ground_truth[:, 5] - enhanced_predictions[:, 5])
+
+    east_vel_improvement = ((baseline_east_vel_error.mean() - enhanced_east_vel_error.mean()) /
+                            baseline_east_vel_error.mean() * 100)
+
+    north_vel_improvement = ((baseline_north_vel_error.mean() - enhanced_north_vel_error.mean()) /
+                             baseline_north_vel_error.mean() * 100)
+
+    up_vel_improvement = ((baseline_up_vel_error.mean() - enhanced_up_vel_error.mean()) /
+                          baseline_up_vel_error.mean() * 100)
+
+    return {
+        "baseline_east_vel_error_mps": baseline_east_vel_error.mean(),
+        "enhanced_east_vel_error_mps": enhanced_east_vel_error.mean(),
+        "baseline_north_vel_error_mps": baseline_north_vel_error.mean(),
+        "enhanced_north_vel_error_mps": enhanced_north_vel_error.mean(),
+        "baseline_up_vel_error_mps": baseline_up_vel_error.mean(),
+        "enhanced_up_vel_error_mps": enhanced_up_vel_error.mean(),
+        "east_vel_improvement_percent": east_vel_improvement,
+        "north_vel_improvement_percent": north_vel_improvement,
+        "up_vel_improvement_percent": up_vel_improvement
+    }
+
 def calculate_spatial_errors(y_true, y_pred):
     """Calculate 2D and Z-Direction errors as in Chen et al."""
     # 2D error (position components 6 and 7 - Latitude/Longitude)
@@ -255,6 +356,144 @@ class PerformanceVisualizer:
 
         plt.tight_layout()
         plt.savefig(self.save_dir / f'spatial_errors{title_suffix}.png')
+        plt.close()
+
+    def plot_position_error_comparison(self, metrics, title_suffix=''):
+        """Plot position error comparison in meters."""
+        plt.figure(figsize=(10, 6))
+
+        # Position errors
+        labels = ['2D Position', 'Height']
+        baseline_values = [
+            metrics['baseline_2d_error_m'],
+            metrics['baseline_height_error_m']
+        ]
+        enhanced_values = [
+            metrics['enhanced_2d_error_m'],
+            metrics['enhanced_height_error_m']
+        ]
+
+        x = np.arange(len(labels))
+        width = 0.35
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        rects1 = ax.bar(x - width / 2, baseline_values, width, label='Standard KF')
+        rects2 = ax.bar(x + width / 2, enhanced_values, width, label='LNN-Enhanced KF')
+
+        # Add labels and title
+        ax.set_ylabel('Error (meters)')
+        ax.set_title('Position Error Comparison')
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.legend()
+
+        # Add improvement percentages
+        for i, (rect1, rect2) in enumerate(zip(rects1, rects2)):
+            improvement = (baseline_values[i] - enhanced_values[i]) / baseline_values[i] * 100
+            height = max(rect1.get_height(), rect2.get_height())
+            ax.annotate(f'{improvement:.1f}% improvement',
+                        xy=(i, height + 0.05),
+                        ha='center', va='bottom',
+                        color='green')
+
+        plt.tight_layout()
+        plt.savefig(self.save_dir / f'position_error_comparison{title_suffix}.png')
+        plt.close()
+
+    def plot_orientation_error_comparison(self, metrics, title_suffix=''):
+        """Plot orientation error comparison in degrees."""
+        plt.figure(figsize=(12, 6))
+
+        labels = ['Roll', 'Pitch', 'Yaw']
+        baseline_values = [
+            metrics['baseline_roll_error_deg'],
+            metrics['baseline_pitch_error_deg'],
+            metrics['baseline_yaw_error_deg']
+        ]
+        enhanced_values = [
+            metrics['enhanced_roll_error_deg'],
+            metrics['enhanced_pitch_error_deg'],
+            metrics['enhanced_yaw_error_deg']
+        ]
+
+        x = np.arange(len(labels))
+        width = 0.35
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        rects1 = ax.bar(x - width / 2, baseline_values, width, label='Standard KF')
+        rects2 = ax.bar(x + width / 2, enhanced_values, width, label='LNN-Enhanced KF')
+
+        # Add labels and title
+        ax.set_ylabel('Error (degrees)')
+        ax.set_title('Orientation Error Comparison')
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.legend()
+
+        # Add improvement percentages
+        improvements = [
+            metrics['roll_improvement_percent'],
+            metrics['pitch_improvement_percent'],
+            metrics['yaw_improvement_percent']
+        ]
+
+        for i, (rect1, rect2, imp) in enumerate(zip(rects1, rects2, improvements)):
+            height = max(rect1.get_height(), rect2.get_height())
+            ax.annotate(f'{imp:.1f}% improvement',
+                        xy=(i, height + 0.05),
+                        ha='center', va='bottom',
+                        color='green')
+
+        plt.tight_layout()
+        plt.savefig(self.save_dir / f'orientation_error_comparison{title_suffix}.png')
+        plt.close()
+
+    def plot_velocity_error_comparison(self, metrics, title_suffix=''):
+        """Plot velocity error comparison in m/s."""
+        plt.figure(figsize=(12, 6))
+
+        labels = ['East', 'North', 'Up']
+        baseline_values = [
+            metrics['baseline_east_vel_error_mps'],
+            metrics['baseline_north_vel_error_mps'],
+            metrics['baseline_up_vel_error_mps']
+        ]
+        enhanced_values = [
+            metrics['enhanced_east_vel_error_mps'],
+            metrics['enhanced_north_vel_error_mps'],
+            metrics['enhanced_up_vel_error_mps']
+        ]
+
+        x = np.arange(len(labels))
+        width = 0.35
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        rects1 = ax.bar(x - width / 2, baseline_values, width, label='Standard KF')
+        rects2 = ax.bar(x + width / 2, enhanced_values, width, label='LNN-Enhanced KF')
+
+        # Add labels and title
+        ax.set_ylabel('Error (m/s)')
+        ax.set_title('Velocity Error Comparison')
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.legend()
+
+        # Add improvement percentages
+        improvements = [
+            metrics['east_vel_improvement_percent'],
+            metrics['north_vel_improvement_percent'],
+            metrics['up_vel_improvement_percent']
+        ]
+
+        for i, (rect1, rect2, imp) in enumerate(zip(rects1, rects2, improvements)):
+            height = max(rect1.get_height(), rect2.get_height())
+            ax.annotate(f'{imp:.1f}% improvement',
+                        xy=(i, height + 0.05),
+                        ha='center', va='bottom',
+                        color='green')
+
+        plt.tight_layout()
+        plt.savefig(self.save_dir / f'velocity_error_comparison{title_suffix}.png')
         plt.close()
 
 

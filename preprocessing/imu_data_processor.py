@@ -12,13 +12,12 @@ We omit complex steps like Madgwick orientation, gravity removal,
 and advanced bias corrections for clarity.
 """
 
-import numpy as np
-import pandas as pd
 import logging
 from pathlib import Path
 from typing import Tuple, Union, Optional, Dict, Any
 
-import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 from scipy.signal import correlate, correlation_lags
 
 
