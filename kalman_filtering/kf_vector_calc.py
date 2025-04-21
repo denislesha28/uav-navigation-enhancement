@@ -7,7 +7,7 @@ from kalman_filtering.uav_navigation_kf import UAVNavigationKF, quaternion_to_eu
 
 def calc_error_state_vector(aligned_data: dict):
     """
-    Calculate error state vector for each timestep using Kalman filter with robust quaternion handling
+    Calculate error state vector for each timestep using Kalman filter with direct column access
 
     Returns:
         List of (timestamp, error_state) tuples
@@ -16,6 +16,7 @@ def calc_error_state_vector(aligned_data: dict):
     gyro_data = aligned_data['RawGyro_df']
     gps_data = aligned_data['Board_gps_df']
     ground_truth = aligned_data['Ground_truth_df']
+    onboard_pose = aligned_data['OnboardPose_df']  # Added OnboardPose data
 
     # Initialize KF
     kf = UAVNavigationKF(dt=0.1)  # 10Hz sampling rate
@@ -25,35 +26,46 @@ def calc_error_state_vector(aligned_data: dict):
     initial_velocity = np.zeros(3)
     initial_attitude = np.zeros(3)
 
-    # Try to get initial state from first ground truth entry
+    # Get initial state from first ground truth entry
     try:
         if not ground_truth.empty and len(ground_truth) > 0:
-            # Position
-            if 'p_RS_R_x' in ground_truth.columns:
-                initial_position = np.array([
-                    ground_truth.iloc[0]['p_RS_R_x'],
-                    ground_truth.iloc[0]['p_RS_R_y'],
-                    ground_truth.iloc[0]['p_RS_R_z']
+            # Position from ground truth
+            initial_position = np.array([
+                ground_truth.iloc[0]['x_gt'],
+                ground_truth.iloc[0]['y_gt'],
+                ground_truth.iloc[0]['z_gt']
+            ])
+
+            # Use GPS velocity from GPS data
+            initial_velocity = np.array([
+                gps_data.iloc[0]['vel_e_m_s'],
+                gps_data.iloc[0]['vel_n_m_s'],
+                -gps_data.iloc[0]['vel_d_m_s']
+            ])
+
+            # Use attitude from OnboardPose quaternion if available, else use ground truth
+            if not onboard_pose.empty and len(onboard_pose) > 0:
+                initial_quat = {
+                    'Attitude_w': onboard_pose.iloc[0]['Attitude_w'],
+                    'Attitude_x': onboard_pose.iloc[0]['Attitude_x'],
+                    'Attitude_y': onboard_pose.iloc[0]['Attitude_y'],
+                    'Attitude_z': onboard_pose.iloc[0]['Attitude_z']
+                }
+                initial_attitude = quaternion_to_euler(initial_quat)
+                print(f"Initialized attitude from OnboardPose: {initial_attitude}")
+            else:
+                # Fallback to ground truth angles (in radians)
+                initial_attitude = np.array([
+                    np.radians(ground_truth.iloc[0]['omega_gt']),
+                    np.radians(ground_truth.iloc[0]['phi_gt']),
+                    np.radians(ground_truth.iloc[0]['kappa_gt'])
                 ])
+                print(f"Initialized attitude from ground truth: {initial_attitude}")
 
-            # Velocity
-            if 'Vel_x' in ground_truth.columns:
-                initial_velocity = np.array([
-                    ground_truth.iloc[0]['Vel_x'],
-                    ground_truth.iloc[0]['Vel_y'],
-                    ground_truth.iloc[0]['Vel_z']
-                ])
-
-            # Attitude - with robust quaternion handling
-            quat_cols = ['Attitude_w', 'Attitude_x', 'Attitude_y', 'Attitude_z']
-            if all(col in ground_truth.columns for col in quat_cols):
-                quat_data = ground_truth.iloc[0][quat_cols]
-                # Check for valid quaternion
-                quat_values = [quat_data['Attitude_w'], quat_data['Attitude_x'],
-                               quat_data['Attitude_y'], quat_data['Attitude_z']]
-
-                if all(np.isfinite(quat_values)) and np.linalg.norm(quat_values) > 1e-10:
-                    initial_attitude = quaternion_to_euler(quat_data)
+            print(f"Initialized from ground truth:")
+            print(f"Position: {initial_position}")
+            print(f"Velocity: {initial_velocity}")
+            print(f"Attitude: {initial_attitude}")
     except Exception as e:
         print(f"Error initializing from ground truth: {e}")
         print("Using default zero initialization")
@@ -118,53 +130,49 @@ def calc_error_state_vector(aligned_data: dict):
             processed_count += 1
 
             # Process ground truth if available
-            if idx in ground_truth.index:
-                # Get true position
-                true_position = np.zeros(3)
-                if 'p_RS_R_x' in ground_truth.columns:
-                    true_position = np.array([
-                        ground_truth.loc[idx]['p_RS_R_x'],
-                        ground_truth.loc[idx]['p_RS_R_y'],
-                        ground_truth.loc[idx]['p_RS_R_z']
-                    ])
-                else:
-                    # If position isn't available, estimate from velocity
-                    if idx > imu_data.index[0]:
-                        dt = (idx - prev_idx).total_seconds()
-                        vel = np.array([
-                            ground_truth.loc[idx]['Vel_x'],
-                            ground_truth.loc[idx]['Vel_y'],
-                            ground_truth.loc[idx]['Vel_z']
-                        ])
-                        true_position = prev_position + vel * dt
-                    else:
-                        true_position = initial_position
-
-                # Get velocity
-                true_velocity = np.array([
-                    ground_truth.loc[idx]['Vel_x'],
-                    ground_truth.loc[idx]['Vel_y'],
-                    ground_truth.loc[idx]['Vel_z']
+            if idx in ground_truth.index and idx in onboard_pose.index:
+                # Get true position from ground truth
+                true_position = np.array([
+                    ground_truth.loc[idx]['x_gt'],
+                    ground_truth.loc[idx]['y_gt'],
+                    ground_truth.loc[idx]['z_gt']
                 ])
 
-                # Get attitude with validation
-                quat_cols = ['Attitude_w', 'Attitude_x', 'Attitude_y', 'Attitude_z']
-                quat_data = ground_truth.loc[idx][quat_cols]
+                # Get velocity from GPS
+                true_velocity = np.array([
+                    gps_data.loc[idx]['vel_e_m_s'],
+                    gps_data.loc[idx]['vel_n_m_s'],
+                    -gps_data.loc[idx]['vel_d_m_s']
+                ])
 
-                # Validate quaternion
-                quat_values = [quat_data['Attitude_w'], quat_data['Attitude_x'],
-                               quat_data['Attitude_y'], quat_data['Attitude_z']]
+                # Get attitude from OnboardPose quaternion
+                try:
+                    quat = {
+                        'Attitude_w': onboard_pose.loc[idx]['Attitude_w'],
+                        'Attitude_x': onboard_pose.loc[idx]['Attitude_x'],
+                        'Attitude_y': onboard_pose.loc[idx]['Attitude_y'],
+                        'Attitude_z': onboard_pose.loc[idx]['Attitude_z']
+                    }
+                    true_euler = quaternion_to_euler(quat)
 
-                if any(np.isnan(quat_values)) or np.linalg.norm(quat_values) < 1e-10:
-                    # Skip error calculation for this frame if quaternion is invalid
-                    continue
-
-                # Convert quaternion to euler angles
-                true_euler = quaternion_to_euler(quat_data)
-
-                # Check for valid euler angles
-                if not np.all(np.isfinite(true_euler)):
-                    continue
+                    # Check if conversion was successful
+                    if np.all(np.isfinite(true_euler)):
+                        # Use quaternion-derived attitude
+                        pass
+                    else:
+                        # Fallback to ground truth angles
+                        true_euler = np.array([
+                            np.radians(ground_truth.loc[idx]['omega_gt']),
+                            np.radians(ground_truth.loc[idx]['phi_gt']),
+                            np.radians(ground_truth.loc[idx]['kappa_gt'])
+                        ])
+                except Exception as e:
+                    # Fallback to ground truth angles on conversion error
+                    true_euler = np.array([
+                        np.radians(ground_truth.loc[idx]['omega_gt']),
+                        np.radians(ground_truth.loc[idx]['phi_gt']),
+                        np.radians(ground_truth.loc[idx]['kappa_gt'])
+                    ])
 
                 # Assemble true state vector
                 true_state = np.concatenate([
@@ -190,8 +198,14 @@ def calc_error_state_vector(aligned_data: dict):
                 prev_idx = idx
                 prev_position = true_position
 
+            # Print progress occasionally
+            if processed_count % 500 == 0:
+                print(f"Processed {processed_count} frames, generated {len(error_states)} error states")
+
         except Exception as e:
             print(f"Error processing frame at {idx}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
     # Final diagnostics
@@ -200,6 +214,7 @@ def calc_error_state_vector(aligned_data: dict):
         print(f"Encountered {error_count} frames with invalid error states")
 
     return error_states
+
 
 def validate_error_states(error_states):
     """
@@ -237,6 +252,7 @@ def validate_error_states(error_states):
         values = error_array[:, i]
         print(f"{name}: min={np.min(values):.4f}, max={np.max(values):.4f}, "
               f"mean={np.mean(values):.4f}, std={np.std(values):.4f}")
+
 
 def plot_error_states(error_states, timestamps, save_path=None):
     """

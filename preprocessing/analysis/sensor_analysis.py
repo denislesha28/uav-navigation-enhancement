@@ -130,7 +130,10 @@ def analyze_noise(aligned_dict):
         # Select appropriate column based on sensor type
         if sensor_name == 'Board_gps_df':
             analysis_col = 'vel_n_m_s'  # Use north velocity component
+        elif sensor_name == "OnboardPose_df":
+            analysis_col = "Attitude_x"
         else:
+            print(sensor_name)
             analysis_col = 'x'
 
         # Time domain noise
@@ -164,6 +167,8 @@ def validate_statistics(aligned_dict):
         # Select appropriate columns based on sensor type
         if sensor_name == 'Board_gps_df':
             cols = ['vel_n_m_s', 'vel_e_m_s', 'vel_d_m_s']
+        elif sensor_name == "OnboardPose_df":
+            pass
         else:
             cols = ['x', 'y', 'z']
 

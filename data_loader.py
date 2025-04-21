@@ -1,5 +1,5 @@
 import pandas as pd
-
+import numpy as np
 
 def prepare_df(df, max_time_us=2.10e8):
     # Your existing prepare_df function
@@ -28,6 +28,15 @@ def prepare_df(df, max_time_us=2.10e8):
 
     return df
 
+def load_ground_truth():
+    gt_positions = pd.read_csv("AGZ/log_files/GroundTruthAGL.csv", index_col="imgid")
+    img_timestamps = pd.read_csv("AGZ/log_files/GroundTruthAGM.csv", index_col="Timpstemp")
+
+    merged_gt = pd.merge(gt_positions, img_timestamps, left_index=True, right_on=" imgid")
+    merged_gt.drop(list(merged_gt.filter(regex="Unnamed")), inplace=True, axis=1)
+    merged_gt.drop(columns=" ", inplace=True)
+    print(merged_gt.columns)
+    return prepare_df(merged_gt)
 
 def load_data():
     """
@@ -59,7 +68,7 @@ def load_data():
     gps_df = prepare_df(gps_df)
     gps_df = gps_df.groupby(level=0).mean()  # Average duplicates
 
-    gt_df = pd.read_csv(
+    onboard_df = pd.read_csv(
         'AGZ/log_files/OnboardPose.csv',
         index_col="Timpstemp",
         usecols=[
@@ -72,7 +81,11 @@ def load_data():
             ' Height'
         ]
     )
-    gt_df = prepare_df(gt_df)
+    onboard_df = prepare_df(onboard_df)
+    preprocess_onboard_pose_quarternions(onboard_df)
+
+
+    gt_df = load_ground_truth()
 
     # -------------------- SENSOR ERROR COMPENSATION --------------------
 
@@ -262,6 +275,7 @@ def load_data():
             # Resample IMU and gyro to regular grid with the initial alignment
             imu_temp = imu_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
             gyro_temp = aligned_gyro_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
+            pose_temp = onboard_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
 
             # Run Kalman filter separately for each axis to smooth and align
             imu_filtered = pd.DataFrame(index=target_idx, columns=['x', 'y', 'z'])
@@ -303,6 +317,26 @@ def load_data():
             imu_aligned = imu_filtered
             gyro_aligned = gyro_filtered
 
+            pose_filtered = pd.DataFrame(index=target_idx)
+            for axis in ['Omega_x', 'Omega_y', 'Omega_z']:
+                if axis in pose_temp.columns:
+                    pose_meas = pose_temp[axis].values
+                    pose_smoothed = np.zeros(len(target_idx))
+                    kalman = create_1d_filter()
+                    for i, z in enumerate(pose_meas):
+                        kalman.predict()
+                        kalman.update(z)
+                        pose_smoothed[i] = kalman.x[0]
+                    pose_filtered[axis] = pose_smoothed
+
+            # Copy other columns without filtering (quaternions, etc.)
+            for col in pose_temp.columns:
+                if col not in pose_filtered.columns:
+                    pose_filtered[col] = pose_temp[col].values
+
+            # Use the filtered data for final alignment
+            onboard_pose_aligned_initial = pose_filtered
+
         except ImportError:
             print("FilterPy not installed. Using basic alignment with lag correction.")
             # Find common time window
@@ -315,6 +349,9 @@ def load_data():
             # Use the initially aligned data
             imu_aligned = imu_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
             gyro_aligned = aligned_gyro_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
+            onboard_pose_aligned_initial = onboard_df.loc[common_start:common_end].reindex(target_idx,
+                                                                                                method='nearest')
+
 
     except Exception as e:
         print(f"Error in alignment: {e}")
@@ -346,6 +383,7 @@ def load_data():
     gyro_aligned = gyro_aligned.reindex(target_idx, method='nearest')
     gps_aligned = gps_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
     gt_aligned = gt_df.loc[common_start:common_end].reindex(target_idx, method='nearest')
+    onboard_pose_aligned = onboard_pose_aligned_initial.reindex(target_idx, method='nearest')
 
     # Report alignment metrics
     print("\nIMU_df alignment metrics:")
@@ -371,5 +409,34 @@ def load_data():
         "IMU_df": imu_aligned,
         "RawGyro_df": gyro_aligned,
         "Board_gps_df": gps_aligned,
+        "OnboardPose_df": onboard_pose_aligned,
         "Ground_truth_df": gt_aligned
     }
+
+
+def preprocess_onboard_pose_quarternions(onboard_df):
+    from scipy import signal
+    # Normalize quaternions
+    qw = onboard_df['Attitude_w']
+    qx = onboard_df['Attitude_x']
+    qy = onboard_df['Attitude_y']
+    qz = onboard_df['Attitude_z']
+    # Calculate quaternion norm
+    qnorm = np.sqrt(qw ** 2 + qx ** 2 + qy ** 2 + qz ** 2)
+    # Normalize only where norm is not too small
+    valid_norm = qnorm > 1e-10
+    onboard_df.loc[valid_norm, 'Attitude_w'] = qw[valid_norm] / qnorm[valid_norm]
+    onboard_df.loc[valid_norm, 'Attitude_x'] = qx[valid_norm] / qnorm[valid_norm]
+    onboard_df.loc[valid_norm, 'Attitude_y'] = qy[valid_norm] / qnorm[valid_norm]
+    onboard_df.loc[valid_norm, 'Attitude_z'] = qz[valid_norm] / qnorm[valid_norm]
+    # Replace invalid quaternions with identity quaternion [1,0,0,0]
+    invalid_norm = ~valid_norm
+    onboard_df.loc[invalid_norm, 'Attitude_w'] = 1.0
+    onboard_df.loc[invalid_norm, 'Attitude_x'] = 0.0
+    onboard_df.loc[invalid_norm, 'Attitude_y'] = 0.0
+    onboard_df.loc[invalid_norm, 'Attitude_z'] = 0.0
+    # Apply filtering where appropriate (e.g., for Omega and Accel)
+    for col in ['Omega_x', 'Omega_y', 'Omega_z', 'Accel_x', 'Accel_y', 'Accel_z']:
+        if col in onboard_df.columns and not onboard_df[col].isna().all():
+            b, a = signal.butter(3, 0.2)
+            onboard_df[col] = signal.filtfilt(b, a, onboard_df[col])

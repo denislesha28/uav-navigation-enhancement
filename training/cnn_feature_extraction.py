@@ -30,7 +30,7 @@ class RMSELoss(nn.Module):
 
 
 class CNNFeatureExtractor(nn.Module):
-    def __init__(self, input_channels=9):
+    def __init__(self, input_channels=12):
         super().__init__()
 
         self.bn_input = nn.BatchNorm1d(input_channels)

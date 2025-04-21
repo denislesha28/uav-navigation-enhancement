@@ -59,10 +59,11 @@ def align_sensors_multi_freq(df_dict, target_freq='100ms'):
             df_aligned = staged_gps_downsample(df_trimmed, target_timestamps, 10)
 
         elif sensor_name == "Ground_truth_df":
-            df_aligned = resample_ground_truth_with_direct_mapping(
-                ground_truth_df=df_trimmed,
-                target_timestamps=target_timestamps
-            )
+            pass
+            # df_aligned = resample_ground_truth_with_direct_mapping(
+            #     ground_truth_df=df_trimmed,
+            #     target_timestamps=target_timestamps
+            # )
 
         else:
             #Keep using nearest for other sensors

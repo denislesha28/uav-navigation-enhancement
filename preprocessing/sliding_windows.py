@@ -339,28 +339,39 @@ def find_closest_error_state(timestamp, error_states):
 
 def create_feature_vector(aligned_data):
     """
-    Create feature vector from aligned sensor data
+    Create enhanced 12D feature vector including orientation data from OnboardPose
 
     Args:
         aligned_data: Dictionary containing aligned sensor data
 
     Returns:
-        numpy.ndarray: Feature vector of shape (n_samples, n_features)
+        numpy array of shape (n_samples, 12) containing feature vectors
     """
-    # IMU accelerations
-    imu_data = aligned_data['IMU_df'][['x', 'y', 'z']].values
+    import numpy as np
 
-    # IMU angular velocities (gyro)
-    gyro_data = aligned_data['RawGyro_df'][['x', 'y', 'z']].values
+    features = [
+        # IMU/Gyro Features (6D)
+        aligned_data['IMU_df'][['x', 'y', 'z']].values,
+        aligned_data['RawGyro_df'][['x', 'y', 'z']].values,
 
-    # GPS velocities
-    gps_data = aligned_data['Board_gps_df'][['vel_n_m_s', 'vel_e_m_s', 'vel_d_m_s']].values
+        # GNSS Features (3D)
+        aligned_data['Board_gps_df'][[
+            'vel_n_m_s',
+            'vel_e_m_s',
+            'vel_d_m_s'
+        ]].values,
 
-    # Combine all features
-    feature_vector = np.hstack([imu_data, gyro_data, gps_data])
+        # OnboardPose Attitude Features (3D) - Using quaternion components
+        # Following Chen et al.'s approach of including attitude information
+        aligned_data['OnboardPose_df'][[
+            'Attitude_w',  # Quaternion scalar component
+            'Attitude_x',  # Quaternion x component
+            'Attitude_y'  # Quaternion y component
+        ]].values
+    ]
 
-    return feature_vector
-
+    # Concatenate all features along the feature dimension (axis=1)
+    return np.concatenate(features, axis=1)
 
 def validate_windows(X: np.ndarray, y: np.ndarray) -> Tuple[bool, Dict]:
     """Validate final window data and return statistics"""

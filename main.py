@@ -9,7 +9,7 @@ from preprocessing.sensor_alignment import validate_alignment, align_sensors_mul
 from preprocessing.sliding_windows import create_sliding_windows, validate_windows
 from training.cnn_feature_extraction import CNNFeatureExtractor, validate_cnn_features, visualize_feature_maps
 from training.lstm.bi_lstm_training import train_lstm
-from training.ltc.ltc_training import train_ltc
+from training.ltc.ltc_training import train_component_ltc
 
 
 def main():
@@ -18,10 +18,9 @@ def main():
     df_data = load_data()
 
     # 2) Align multi-frequency data
+    print(df_data["Ground_truth_df"].columns)
     aligned_data = align_sensors_multi_freq(df_data)
-    print("IMU Timestamps (first 5):", aligned_data['IMU_df'].index[:5])
-    print("Ground Truth Timestamps (first 5):", aligned_data['Ground_truth_df'].index[:5])
-    print("GPS Timestamps (first 5):", aligned_data['Board_gps_df'].index[:5])  # Also check GPS
+    aligned_data = df_data
 
     error_states = calc_error_state_vector(aligned_data)
     validate_error_states(error_states)
@@ -48,7 +47,7 @@ def main():
     analyze_distributions(aligned_data)
     analyze_noise(aligned_data)
 
-    validate_statistics(aligned_data)
+    # validate_statistics(aligned_data)
 
     X, y = create_sliding_windows(aligned_data, error_states)
 
@@ -66,8 +65,8 @@ def main():
 
     validate_cnn_features(X, X_spatial)
     visualize_feature_maps(X_spatial)
-    # train_ltc(X_spatial[0], y, device)
-    train_lstm(X_spatial[0], y, device)
+    train_component_ltc(X_spatial[0], y, device)
+    # train_lstm(X_spatial[0], y, device)
     # train_ltc(X_spatial[0], y, device)
     # training_params = {
     #     'epochs': 200,
