@@ -1,0 +1,29 @@
+LSTM Metrics
+2025-05-31 04:54:41,955 - INFO - mse: 0.1754
+2025-05-31 04:54:41,955 - INFO - rmse: 0.4188
+2025-05-31 04:54:41,955 - INFO - mae: 0.2972
+2025-05-31 04:54:41,955 - INFO - kendall_tau: 0.8547
+2025-05-31 04:54:41,955 - INFO - explained_variance: 0.1287
+2025-05-31 04:54:41,955 - INFO - 2d_error_mean: 0.6340
+2025-05-31 04:54:41,955 - INFO - 2d_error_std: 0.4356
+2025-05-31 04:54:41,955 - INFO - z_error_mean: 0.3758
+2025-05-31 04:54:41,955 - INFO - z_error_std: 0.2567
+2025-05-31 04:54:41,955 - INFO -
+Component-wise Metrics:
+2025-05-31 04:54:41,955 - INFO - Component Roll (φE): RMSE=0.5054, τ=0.0851
+2025-05-31 04:54:41,955 - INFO - Component Pitch (φN): RMSE=0.3320, τ=0.4897
+2025-05-31 04:54:41,955 - INFO - Component Yaw (φU): RMSE=0.3899, τ=0.4483
+2025-05-31 04:54:41,955 - INFO - Component East (δυE): RMSE=0.2418, τ=0.5816
+2025-05-31 04:54:41,955 - INFO - Component North (δυN): RMSE=0.2321, τ=0.4437
+2025-05-31 04:54:41,955 - INFO - Component Up (δυU): RMSE=0.4554, τ=0.4759
+2025-05-31 04:54:41,955 - INFO - Component Latitude (δL): RMSE=0.6110, τ=0.9494
+2025-05-31 04:54:41,955 - INFO - Component Longitude (δλ): RMSE=0.4674, τ=0.9632
+2025-05-31 04:54:41,955 - INFO - Component Height (δh): RMSE=0.4551, τ=0.9632
+2025-05-31 04:54:41,955 - INFO - Component X-axis (εx): RMSE=0.0884, τ=0.3563
+2025-05-31 04:54:41,955 - INFO - Component Y-axis (εy): RMSE=0.0733, τ=0.2736
+2025-05-31 04:54:41,955 - INFO - Component Z-axis (εz): RMSE=0.0559, τ=0.6552
+2025-05-31 04:54:41,955 - INFO - Component X-axis (∇x): RMSE=0.6120, τ=0.9264
+2025-05-31 04:54:41,955 - INFO - Component Y-axis (∇y): RMSE=0.7625, τ=0.9586
+2025-05-31 04:54:41,955 - INFO - Component Z-axis (∇z): RMSE=0.1480, τ=0.8989
+
+Process finished with exit code 0
